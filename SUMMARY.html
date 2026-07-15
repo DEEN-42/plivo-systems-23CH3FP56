@@ -299,7 +299,6 @@
 
 <div class="page">
 
-  <!-- ── 1. ARCHITECTURE OVERVIEW ─────────────────────────── -->
   <section>
     <div class="section-title">
       <span class="icon">🏗</span>
@@ -358,20 +357,19 @@
       <h3>Data Flow</h3>
       <ul>
         <li>The <strong>harness source</strong> emits 164-byte frames (4 B big-endian seq + 160 B payload) to the sender at exactly <code>t₀ + i × 20 ms</code>.</li>
-        <li>The <strong>sender</strong> wraps each frame in a 5-byte custom header (169 B total) and sends it upstream through the relay. It simultaneously maintains two interleaved XOR accumulators, emitting one FEC parity packet for every three data packets.</li>
+        <li>The <strong>sender</strong> wraps each frame in a 5-byte custom header (169 B total) and sends it upstream through the relay. It simultaneously maintains two interleaved XOR accumulators, emitting one FEC parity packet for every two data packets (k=2).</li>
         <li>The <strong>hostile relay</strong> applies loss, variable delay, duplication, and reordering per the active profile. Every byte it receives (on ingress) is counted toward the bandwidth overhead score — including dropped packets.</li>
-        <li>The <strong>receiver</strong> runs two threads: an ingress thread that buffers all arriving packets and performs XOR recovery, and a playout thread that fires at each frame's deadline and delivers recovered frames to the player.</li>
+        <li>The <strong>receiver</strong> runs two threads: an ingress thread that buffers all arriving packets and performs O(1) XOR recovery, and a playout timer thread that fires 5 ms before each frame's deadline to deliver recovered frames to the player.</li>
         <li>The <strong>harness player</strong> records the first arrival time of each frame. A frame is valid only if it arrives before <code>t₀ + DELAY_MS + i × 20 ms</code> with the correct payload.</li>
       </ul>
     </div>
 
     <div class="callout info">
       <div class="callout-icon">ℹ️</div>
-      <div class="callout-body"><strong>Feedback path intentionally unused.</strong> Ports 47003/47004 are left idle. Every byte sent downstream counts against the 2.0× overhead budget, and retransmission RTTs (40–160 ms through the relay) cannot fit inside the 160 ms playout window.</div>
+      <div class="callout-body"><strong>Feedback path intentionally unused.</strong> Ports 47003/47004 are left idle. Every byte sent downstream counts against the 2.0× overhead budget, and retransmission RTTs (40–160 ms through the relay) cannot fit inside the strict playout window.</div>
     </div>
   </section>
 
-  <!-- ── 2. WIRE FORMAT ─────────────────────────────────────── -->
   <section>
     <div class="section-title">
       <span class="icon">📦</span>
@@ -408,7 +406,7 @@
             <td class="offset">3</td>
             <td class="size">1 byte</td>
             <td class="field">fec_group_size</td>
-            <td class="desc">Actual value of k for this group (normally 3; may be less for a partial trailing group).</td>
+            <td class="desc">Actual value of k for this group (normally 2; may be less for a partial trailing group).</td>
           </tr>
           <tr>
             <td class="offset">4</td>
@@ -438,7 +436,6 @@
              <span class="dim">│←─────────── 5-byte custom header ──────────────────→│←── 164 bytes of payload ──→│</span></code></pre>
   </section>
 
-  <!-- ── 3. FEC ──────────────────────────────────────────────── -->
   <section>
     <div class="section-title">
       <span class="icon">🔧</span>
@@ -454,16 +451,16 @@
     </div>
 
     <div class="card">
-      <h3>Depth-2 Interleaved XOR FEC (k = 3)</h3>
-      <p>The sender maintains <strong>D = 2</strong> concurrent XOR accumulators and round-robins frames between them. With group size <strong>k = 3</strong>, a group completes every 6 frames and one parity packet is sent immediately after the third member arrives at the sender.</p>
+      <h3>Depth-2 Interleaved XOR FEC (k = 2)</h3>
+      <p>The sender maintains <strong>D = 2</strong> concurrent XOR accumulators and round-robins frames between them. With group size <strong>k = 2</strong>, a group completes every 4 frames and one parity packet is sent immediately after the second member arrives at the sender.</p>
       <p>Frames are grouped so that consecutive frames always fall in <em>different</em> groups:</p>
-      <pre><code><span class="hl">Group A:</span> frames { 0, 2, 4 }  →  parity_A = frame_0 ⊕ frame_2 ⊕ frame_4
-<span class="hl">Group B:</span> frames { 1, 3, 5 }  →  parity_B = frame_1 ⊕ frame_3 ⊕ frame_5
-<span class="hl">Group C:</span> frames { 6, 8, 10 } →  ...
+      <pre><code><span class="hl">Group A:</span> frames { 0, 2 }  →  parity_A = frame_0 ⊕ frame_2
+<span class="hl">Group B:</span> frames { 1, 3 }  →  parity_B = frame_1 ⊕ frame_3
+<span class="hl">Group C:</span> frames { 4, 6 } →  ...
 ...
-<span class="dim">A burst of 2 consecutive losses (e.g. frames 4 & 5) hits Group A once and Group B once.
+<span class="dim">A burst of 2 consecutive losses (e.g. frames 2 & 3) hits Group A once and Group B once.
 Each group loses only one member → both fully recoverable via XOR.</span></code></pre>
-      <p><strong>Recovery rule:</strong> if exactly one of the k data packets is missing and the parity packet has arrived, the receiver reconstructs the lost payload as <code>lost = parity ⊕ (all other data packets)</code>.</p>
+      <p><strong>Recovery rule:</strong> If exactly one data packet is missing from the group and the parity packet is present, the receiver instantly reconstructs the lost payload in O(1) time as <code>lost = parity ⊕ (present data packet)</code>.</p>
     </div>
 
     <div class="formula-row">
@@ -474,30 +471,29 @@ Each group loses only one member → both fully recoverable via XOR.</span></cod
       </div>
       <div class="formula-card">
         <div class="label">Parity packets / run</div>
-        <div class="value">500</div>
-        <div class="desc">1500 / 3 = 500 parity × 169 B = 84,500 B upstream</div>
+        <div class="value">750</div>
+        <div class="desc">1500 / 2 = 750 parity × 169 B = 126,750 B upstream</div>
       </div>
       <div class="formula-card">
         <div class="label">Total upstream bytes</div>
-        <div class="value">338,000 B</div>
-        <div class="desc">253,500 + 84,500 (feedback = 0)</div>
+        <div class="value">380,250 B</div>
+        <div class="desc">253,500 + 126,750 (feedback = 0)</div>
       </div>
       <div class="formula-card">
         <div class="label">Bandwidth overhead</div>
-        <div class="value" style="color:var(--accent)">1.41×</div>
-        <div class="desc">338,000 / (1500 × 160) = 1.4083× ≤ 2.00× ✓</div>
+        <div class="value" style="color:var(--accent)">1.58×</div>
+        <div class="desc">380,250 / (1500 × 160) = 1.584× ≤ 2.00× ✓</div>
       </div>
     </div>
 
     <div class="callout info">
       <div class="callout-icon">📐</div>
       <div class="callout-body">
-        <strong>Delay cost of depth-2 interleaving.</strong> A consecutive grouping (k=3) would require <code>delay_ms ≥ (k-1)×20 + max_relay_delay = 40 + 40 = 80 ms</code> on Profile A. The depth-2 interleave spans <code>(k-1)×D×20 = 80 ms</code>, raising the minimum to <strong>120 ms (A) / 160 ms (B)</strong> — a fixed +40 ms penalty in exchange for surviving any 2-frame consecutive burst. Dropping to k=2 consecutive would not help: a 2-frame burst still knocks out the entire group. Interleaving is the only structural defence.
+        <strong>Delay cost of depth-2 interleaving.</strong> By trading unused bandwidth overhead to shrink our group size from k=3 to <strong>k=2</strong>, the depth-2 interleave spans only <code>(k-1)×D×20 = 40 ms</code>. This allows us to aggressively drop the minimum playout delays to <strong>75 ms (A) / 130 ms (B)</strong> while maintaining the exact same consecutive-burst tolerance.
       </div>
     </div>
   </section>
 
-  <!-- ── 4. JITTER BUFFER ───────────────────────────────────── -->
   <section>
     <div class="section-title">
       <span class="icon">⏱</span>
@@ -513,13 +509,12 @@ Each group loses only one member → both fully recoverable via XOR.</span></cod
     <div class="card">
       <h3>Two-Thread Design</h3>
       <ul>
-        <li><strong>Ingress thread</strong> — loops on <code>recvfrom(:47002)</code>. Parses the 5-byte header, bounds-checks <code>frame_seq</code>, copies the payload into <code>jbuf[frame_seq]</code>, sets <code>present = 1</code> (with <code>memory_order_release</code>), and updates FEC group state. If a group now has k−1 data packets plus a parity packet, it XOR-recovers the missing frame and injects it into the jitter buffer — potentially before the playout deadline.</li>
-        <li><strong>Playout timer thread</strong> — iterates frame indices <code>i = 0 … n_frames−1</code>. For each <code>i</code> it calls <code>clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, …)</code> targeting <code>t₀ + DELAY_MS/1000 + i×0.020 − 0.001</code> seconds (1 ms safety margin). On wake: if <code>jbuf[i].present</code> it sends 164 bytes to the player; otherwise it skips and continues immediately to <code>i+1</code>. <strong>It never blocks waiting for a specific missing frame</strong>, preventing cascading deadline failures.</li>
+        <li><strong>Ingress thread</strong> — loops on <code>recvfrom(:47002)</code>. Parses the 5-byte header, bounds-checks <code>frame_seq</code>, copies the payload into <code>jbuf[frame_seq]</code>, sets <code>present = 1</code> (with <code>memory_order_release</code>), and updates FEC group state. It executes O(1) XOR recovery the millisecond a missing frame's group is resolvable, injecting it into the jitter buffer before the playout deadline.</li>
+        <li><strong>Playout timer thread</strong> — iterates frame indices <code>i = 0 … n_frames−1</code>. For each <code>i</code> it calls <code>clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, …)</code> targeting <code>t₀ + DELAY_MS/1000 + i×0.020 − 0.005</code> seconds (<strong>5 ms safety margin</strong> for OS scheduler variance). On wake: if <code>jbuf[i].present</code> it sends 164 bytes to the player; otherwise it skips and continues immediately to <code>i+1</code>. <strong>It never blocks waiting for a specific missing frame</strong>, preventing cascading deadline failures.</li>
       </ul>
     </div>
   </section>
 
-  <!-- ── 5. FINAL METRICS ──────────────────────────────────── -->
   <section>
     <div class="section-title">
       <span class="icon">📊</span>
@@ -529,23 +524,23 @@ Each group loses only one member → both fully recoverable via XOR.</span></cod
     <div class="formula-row" style="margin-bottom:1.5rem">
       <div class="formula-card">
         <div class="label">Grading delay (declared)</div>
-        <div class="value">160 ms</div>
+        <div class="value">130 ms</div>
         <div class="desc">Conservative value covering Profile B worst-case</div>
       </div>
       <div class="formula-card">
         <div class="label">Bandwidth overhead</div>
-        <div class="value" style="color:var(--accent)">1.41×</div>
+        <div class="value" style="color:var(--accent)">1.58×</div>
         <div class="desc">Deterministic; identical across all 10 runs</div>
       </div>
       <div class="formula-card">
         <div class="label">Profile A miss rate range</div>
-        <div class="value" style="color:var(--valid)">0.07–0.20%</div>
-        <div class="desc">Seeds 1–5 &nbsp;|&nbsp; cap: 1.00%</div>
+        <div class="value" style="color:var(--valid)">0.33–0.87%</div>
+        <div class="desc">Tested at 75 ms | cap: 1.00%</div>
       </div>
       <div class="formula-card">
         <div class="label">Profile B miss rate range</div>
-        <div class="value" style="color:var(--valid)">0.60–0.93%</div>
-        <div class="desc">Seeds 1–5 &nbsp;|&nbsp; cap: 1.00%</div>
+        <div class="value" style="color:var(--valid)">0.47–0.93%</div>
+        <div class="desc">Tested at 130 ms | cap: 1.00%</div>
       </div>
     </div>
 
@@ -556,8 +551,6 @@ Each group loses only one member → both fully recoverable via XOR.</span></cod
             <th>Profile</th>
             <th>Seed</th>
             <th>Frames</th>
-            <th>Dropped</th>
-            <th>Duped</th>
             <th>Misses</th>
             <th>Miss Rate</th>
             <th>Up Bytes</th>
@@ -567,16 +560,16 @@ Each group loses only one member → both fully recoverable via XOR.</span></cod
           </tr>
         </thead>
         <tbody>
-          <tr><td><strong>A_mild</strong></td><td>1</td><td>1500</td><td>45</td><td>14</td><td>2</td><td>0.13%</td><td>338000</td><td>1.41×</td><td>120 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>B_moderate</strong></td><td>1</td><td>1500</td><td>113</td><td>23</td><td>12</td><td>0.80%</td><td>338000</td><td>1.41×</td><td>160 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>A_mild</strong></td><td>2</td><td>1500</td><td>41</td><td>12</td><td>1</td><td>0.07%</td><td>338000</td><td>1.41×</td><td>120 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>B_moderate</strong></td><td>2</td><td>1500</td><td>107</td><td>23</td><td>13</td><td>0.87%</td><td>338000</td><td>1.41×</td><td>160 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>A_mild</strong></td><td>3</td><td>1500</td><td>48</td><td>8</td><td>3</td><td>0.20%</td><td>338000</td><td>1.41×</td><td>120 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>B_moderate</strong></td><td>3</td><td>1500</td><td>107</td><td>16</td><td>14</td><td>0.93%</td><td>338000</td><td>1.41×</td><td>160 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>A_mild</strong></td><td>4</td><td>1500</td><td>28</td><td>6</td><td>3</td><td>0.20%</td><td>338000</td><td>1.41×</td><td>120 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>B_moderate</strong></td><td>4</td><td>1500</td><td>79</td><td>17</td><td>9</td><td>0.60%</td><td>338000</td><td>1.41×</td><td>160 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>A_mild</strong></td><td>5</td><td>1500</td><td>24</td><td>11</td><td>1</td><td>0.07%</td><td>338000</td><td>1.41×</td><td>120 ms</td><td><span class="valid-badge">VALID</span></td></tr>
-          <tr><td><strong>B_moderate</strong></td><td>5</td><td>1500</td><td>95</td><td>17</td><td>11</td><td>0.73%</td><td>338000</td><td>1.41×</td><td>160 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>A_mild</strong></td><td>1</td><td>1500</td><td>9</td><td>0.60%</td><td>380250</td><td>1.58×</td><td>75 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>B_moderate</strong></td><td>1</td><td>1500</td><td>12</td><td>0.80%</td><td>380250</td><td>1.58×</td><td>130 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>A_mild</strong></td><td>2</td><td>1500</td><td>13</td><td>0.87%</td><td>380250</td><td>1.58×</td><td>75 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>B_moderate</strong></td><td>2</td><td>1500</td><td>13</td><td>0.87%</td><td>380250</td><td>1.58×</td><td>130 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>A_mild</strong></td><td>3</td><td>1500</td><td>9</td><td>0.60%</td><td>380250</td><td>1.58×</td><td>75 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>B_moderate</strong></td><td>3</td><td>1500</td><td>7</td><td>0.47%</td><td>380250</td><td>1.58×</td><td>130 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>A_mild</strong></td><td>4</td><td>1500</td><td>5</td><td>0.33%</td><td>380250</td><td>1.58×</td><td>75 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>B_moderate</strong></td><td>4</td><td>1500</td><td>14</td><td>0.93%</td><td>380250</td><td>1.58×</td><td>130 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>A_mild</strong></td><td>5</td><td>1500</td><td>6</td><td>0.40%</td><td>380250</td><td>1.58×</td><td>75 ms</td><td><span class="valid-badge">VALID</span></td></tr>
+          <tr><td><strong>B_moderate</strong></td><td>5</td><td>1500</td><td>11</td><td>0.73%</td><td>380250</td><td>1.58×</td><td>130 ms</td><td><span class="valid-badge">VALID</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -584,7 +577,7 @@ Each group loses only one member → both fully recoverable via XOR.</span></cod
     <div class="callout info" style="margin-top:1.25rem">
       <div class="callout-icon">⚠️</div>
       <div class="callout-body">
-        <strong>Known failure conditions.</strong> The system will exceed the 1% miss cap if the network delivers correlated burst losses of 3+ consecutive frames (two hits on the same interleaved group) or if steady-state one-way relay latency exceeds <code>DELAY_MS − 80 ms = 80 ms</code> (Profile B), causing packets to arrive past the playout deadline with no retroactive recovery path.
+        <strong>Known failure conditions.</strong> The system will exceed the 1% miss cap if the network delivers correlated burst losses of 3+ consecutive frames (two hits on the same interleaved group) or if steady-state one-way relay latency exceeds <code>DELAY_MS − 40 ms = 90 ms</code> (Profile B), causing packets to arrive past the playout deadline with no retroactive recovery path.
       </div>
     </div>
   </section>
