@@ -1,4 +1,4 @@
-/* FEC SENDER — depth-2 interleaved XOR parity, k=3.
+/* FEC SENDER — depth-2 interleaved XOR parity, k=2.
  *
  * Ports (all 127.0.0.1):
  *   bind 47010  <- harness source delivers frame i at t0 + i*20ms
@@ -8,13 +8,13 @@
  * Wire format (our custom protocol, 169 bytes):
  *   [0]     pkt_type:       0x00 = DATA, 0x01 = FEC parity
  *   [1..2]  frame_seq:      uint16 BE (DATA: frame#; FEC: first member's seq)
- *   [3]     fec_group_size: actual k for this group (normally 3, less for trailing)
+ *   [3]     fec_group_size: actual k for this group (normally 2, less for trailing)
  *   [4]     fec_index:      slot within group (DATA: 0..k-1; FEC: k)
  *   [5..168] payload:       164 bytes (DATA: original harness pkt; FEC: XOR of all k)
  *
  * Interleaving: D=2 concurrent groups. Frame i goes to group (i % D).
- *   Group members are spaced 2 frames apart: {0,2,4}, {1,3,5}, {6,8,10}, ...
- *   This survives any burst of <= 2 consecutive losses.
+ *   Group members are spaced 2 frames apart: {0,2}, {1,3}, {4,6}, {5,7}, ...
+ *   k=2 trades overhead (1.58x vs 1.41x) for 40ms lower playout delay.
  *
  * Env vars: T0, DURATION_S, DELAY_MS (only DURATION_S is used here).
  * The harness kills this process with SIGKILL when the run ends.
@@ -30,7 +30,7 @@
 #define HARNESS_PKT_SZ 164   
 #define WIRE_HDR_SZ    5
 #define WIRE_PKT_SZ    (WIRE_HDR_SZ + HARNESS_PKT_SZ)  
-#define FEC_K          3    
+#define FEC_K          2    
 #define INTERLEAVE_D   2   
 #define FRAME_MS       20
 

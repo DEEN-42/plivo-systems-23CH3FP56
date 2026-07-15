@@ -36,7 +36,7 @@
 #define HARNESS_PKT_SZ 164
 #define WIRE_HDR_SZ    5
 #define WIRE_PKT_SZ    (WIRE_HDR_SZ + HARNESS_PKT_SZ)
-#define FEC_K          3
+#define FEC_K          2
 #define INTERLEAVE_D   2
 #define BLOCK_SZ       (FEC_K * INTERLEAVE_D)
 #define FRAME_MS       20
@@ -106,7 +106,34 @@ static void try_fec_recovery(int gid) {
 
     int k = g->actual_k ? g->actual_k : FEC_K;
 
-    
+    /* --- O(1) fast path for k=2 (the common case) --- */
+    if (k == 2) {
+        int p0 = g->data_present[0];
+        int p1 = g->data_present[1];
+
+        /* need exactly one missing */
+        if (p0 == p1)          /* both present or both missing */
+            return;
+
+        int missing = p0 ? 1 : 0;
+        int present = 1 - missing;
+
+        /* recovered = parity XOR the single present data packet */
+        uint8_t recovered[HARNESS_PKT_SZ];
+        for (int b = 0; b < HARNESS_PKT_SZ; b++)
+            recovered[b] = g->parity[b] ^ g->data[present][b];
+
+        int fseq = fec_group_member(gid, missing);
+        if (fseq >= 0 && fseq < n_padded && !is_seen(fseq)) {
+            memcpy(jbuf[fseq].payload, recovered, HARNESS_PKT_SZ);
+            atomic_store_explicit(&jbuf[fseq].present, 1, memory_order_release);
+            mark_seen(fseq);
+        }
+        g->recovered = 1;
+        return;
+    }
+
+    /* --- generic fallback for partial trailing groups with k=1 --- */
     int missing = -1;
     int missing_count = 0;
     for (int j = 0; j < k; j++) {
@@ -116,9 +143,8 @@ static void try_fec_recovery(int gid) {
         }
     }
     if (missing_count != 1)
-        return;  
+        return;
 
-    
     uint8_t recovered[HARNESS_PKT_SZ];
     memcpy(recovered, g->parity, HARNESS_PKT_SZ);
     for (int j = 0; j < k; j++) {
@@ -127,14 +153,12 @@ static void try_fec_recovery(int gid) {
             recovered[b] ^= g->data[j][b];
     }
 
-    
     int fseq = fec_group_member(gid, missing);
     if (fseq >= 0 && fseq < n_padded && !is_seen(fseq)) {
         memcpy(jbuf[fseq].payload, recovered, HARNESS_PKT_SZ);
         atomic_store_explicit(&jbuf[fseq].present, 1, memory_order_release);
         mark_seen(fseq);
     }
-
     g->recovered = 1;
 }
 
@@ -154,7 +178,7 @@ static void *playout_thread(void *arg) {
        
         double deadline = g_t0 + g_delay_ms / 1000.0
                         + (double)i * FRAME_MS / 1000.0;
-        double target = deadline - 0.001;
+        double target = deadline - 0.005;
 
         struct timespec ts;
         ts.tv_sec  = (time_t)target;
