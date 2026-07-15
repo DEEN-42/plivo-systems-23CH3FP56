@@ -7,7 +7,7 @@ sender: sender.c
 	$(CC) $(CFLAGS) -o sender sender.c
 
 receiver: receiver.c
-	$(CC) $(CFLAGS) -o receiver receiver.c
+	$(CC) $(CFLAGS) -o receiver receiver.c -lpthread
 
 clean:
 	rm -f sender receiver
